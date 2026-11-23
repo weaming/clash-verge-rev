@@ -12,17 +12,17 @@ on:
         description: '运行 macOS aarch64'
         required: false
         type: boolean
-        default: true
+        default: false
       run_windows_arm64:
         description: '运行 Windows ARM64'
         required: false
         type: boolean
-        default: true
+        default: false
       run_linux_amd64:
         description: '运行 Linux amd64'
         required: false
         type: boolean
-        default: true
+        default: false
 
 permissions: write-all
 env:
@@ -46,7 +46,7 @@ jobs:
             bundle: nsis
             id: windows
             input: run_windows
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
             bundle: dmg
             id: macos-aarch64
@@ -80,7 +80,7 @@ jobs:
         if: github.event.inputs[matrix.input] == 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/dev' }}
+          save-if: ${{ github.ref == 'refs/heads/develop' }}
           prefix-key: 'v1-rust'
           shared-key: 'rust-shared-stable-${{ matrix.os }}-${{ matrix.target }}'
           workspaces: |
@@ -125,26 +125,22 @@ jobs:
           rustup target list --installed
           echo "Rust target ${{ matrix.target }} installed."
 
+      - name: Disable updater artifacts for unsigned dev build
+        if: github.event.inputs[matrix.input] == 'true'
+        run: node -e "require('fs').writeFileSync('src-tauri/tauri.dev-nosign.conf.json', JSON.stringify({bundle:{createUpdaterArtifacts:false}}))"
+
       - name: Tauri build
         if: github.event.inputs[matrix.input] == 'true'
         uses: tauri-apps/tauri-action@v1
         env:
           NODE_OPTIONS: '--max_old_space_size=4096'
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tauriScript: pnpm
-          args: --target ${{ matrix.target }} -b ${{ matrix.bundle }}
+          args: --target ${{ matrix.target }} -b ${{ matrix.bundle }} -c src-tauri/tauri.dev-nosign.conf.json
 
       - name: Upload Artifacts (macOS)
-        if: matrix.os == 'macos-latest' && github.event.inputs[matrix.input] == 'true'
+        if: startsWith(matrix.os, 'macos-') && github.event.inputs[matrix.input] == 'true'
         uses: actions/upload-artifact@v7
         with:
           archive: false
