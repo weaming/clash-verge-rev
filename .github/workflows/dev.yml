@@ -44,67 +44,84 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  dev:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_targets: ${{ steps.set-matrix.outputs.has_targets }}
+    steps:
+      - name: Select build targets
+        id: set-matrix
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_WINDOWS: ${{ github.event.inputs.run_windows }}
+          RUN_MACOS_AARCH64: ${{ github.event.inputs.run_macos_aarch64 }}
+          RUN_WINDOWS_ARM64: ${{ github.event.inputs.run_windows_arm64 }}
+          RUN_LINUX_AMD64: ${{ github.event.inputs.run_linux_amd64 }}
+        run: |
+          node <<'EOF' >> "$GITHUB_OUTPUT"
+          const isPush = process.env.EVENT_NAME === 'push';
+          const enabled = (envName, defaultOn) =>
+            isPush ? defaultOn : process.env[envName] === 'true';
+
+          const all = [
+            {
+              os: 'windows-latest',
+              target: 'x86_64-pc-windows-msvc',
+              bundle: 'nsis',
+              id: 'windows',
+              asset_glob: 'target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe',
+              on: enabled('RUN_WINDOWS', true),
+            },
+            {
+              os: 'macos-15',
+              target: 'aarch64-apple-darwin',
+              bundle: 'dmg',
+              id: 'macos-aarch64',
+              asset_glob: 'target/aarch64-apple-darwin/release/bundle/dmg/*.dmg',
+              on: enabled('RUN_MACOS_AARCH64', false),
+            },
+            {
+              os: 'windows-latest',
+              target: 'aarch64-pc-windows-msvc',
+              bundle: 'nsis',
+              id: 'windows-arm64',
+              asset_glob: 'target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe',
+              on: enabled('RUN_WINDOWS_ARM64', false),
+            },
+            {
+              os: 'ubuntu-22.04',
+              target: 'x86_64-unknown-linux-gnu',
+              bundle: 'deb',
+              id: 'linux-amd64',
+              asset_glob: 'target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb',
+              on: enabled('RUN_LINUX_AMD64', false),
+            },
+          ];
+
+          const selected = all
+            .filter((item) => item.on)
+            .map(({ on, ...rest }) => rest);
+
+          console.log(`matrix=${JSON.stringify({ include: selected })}`);
+          console.log(`has_targets=${selected.length > 0}`);
+          EOF
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.has_targets == 'true'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            bundle: nsis
-            id: windows
-            input: run_windows
-            default_enabled: true
-            asset_glob: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-          - os: macos-15
-            target: aarch64-apple-darwin
-            bundle: dmg
-            id: macos-aarch64
-            input: run_macos_aarch64
-            default_enabled: false
-            asset_glob: target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            bundle: nsis
-            id: windows-arm64
-            input: run_windows_arm64
-            default_enabled: false
-            asset_glob: target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            bundle: deb
-            id: linux-amd64
-            input: run_linux_amd64
-            default_enabled: false
-            asset_glob: target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
-
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Determine whether to run target
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            SHOULD_RUN="${{ matrix.default_enabled }}"
-          elif [ "${{ github.event.inputs[matrix.input] }}" = "true" ]; then
-            SHOULD_RUN="true"
-          else
-            SHOULD_RUN="false"
-          fi
-          echo "SHOULD_RUN=$SHOULD_RUN" >> "$GITHUB_ENV"
-          if [ "$SHOULD_RUN" != "true" ]; then
-            echo "Job ${{ matrix.id }} skipped as configured"
-          fi
-
       - name: Checkout Repository
-        if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v7
 
       - name: Install Rust Toolchain
-        if: env.SHOULD_RUN == 'true'
         uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Rust Cache
-        if: env.SHOULD_RUN == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/tags/v') }}
@@ -116,42 +133,36 @@ jobs:
           cache-workspace-crates: true
 
       - name: Install dependencies (ubuntu only)
-        if: matrix.os == 'ubuntu-22.04' && env.SHOULD_RUN == 'true'
+        if: matrix.os == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libxslt1.1 libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - uses: pnpm/action-setup@v6
         name: Install pnpm
-        if: env.SHOULD_RUN == 'true'
         with:
           run_install: false
 
       - name: Install Node
-        if: env.SHOULD_RUN == 'true'
         uses: actions/setup-node@v7
         with:
           node-version: '26.13.1'
           cache: 'pnpm'
 
       - name: Pnpm install and prebuild
-        if: env.SHOULD_RUN == 'true'
         run: |
           pnpm i
           pnpm run prebuild ${{ matrix.target }}
 
       - name: Add Rust Target
-        if: env.SHOULD_RUN == 'true'
         run: |
           rustup target add ${{ matrix.target }} --toolchain 1.100.0 || rustup target add ${{ matrix.target }}
           rustup target list --installed
 
       - name: Disable updater artifacts for unsigned build
-        if: env.SHOULD_RUN == 'true'
         run: node -e "require('fs').writeFileSync('src-tauri/tauri.dev-nosign.conf.json', JSON.stringify({bundle:{createUpdaterArtifacts:false}}))"
 
       - name: Tauri build
-        if: env.SHOULD_RUN == 'true'
         uses: tauri-apps/tauri-action@v1
         env:
           NODE_OPTIONS: '--max_old_space_size=4096'
@@ -161,7 +172,6 @@ jobs:
           args: --target ${{ matrix.target }} -b ${{ matrix.bundle }} -c src-tauri/tauri.dev-nosign.conf.json
 
       - name: Upload bundle to GitHub Release
-        if: env.SHOULD_RUN == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
